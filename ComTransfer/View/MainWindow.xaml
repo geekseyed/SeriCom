@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:ComTransfer"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=local:ComPort}"
-        Title="Automated Serial File Transfer Tool" Width="380" Height="560" MinWidth="280" MinHeight="360" Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}" Closing="Window_Closing" KeyDown="Window_KeyDown" Icon="/app.ico">
+        Title="Automated Serial File Transfer Tool" Width="440" Height="560" MinWidth="400" MinHeight="360" Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}" Closing="Window_Closing" KeyDown="Window_KeyDown" Icon="/app.ico">
     <Control>
         <Control.Resources>
             <local:IsMoreThanConverter x:Key="IsMoreThanConverter"/>
@@ -84,6 +84,7 @@
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Label Grid.Column="0" Content="Serial Port"/>
                         <StackPanel Grid.Column="1" Margin="4,0" Orientation="Horizontal">
@@ -94,7 +95,21 @@
                             <Label Content="DCD" Style="{StaticResource Label_Status}" IsEnabled="{Binding Status_CD}" ToolTip="DCD status"/>
                             <Label Content="RI" Style="{StaticResource Label_Status}" IsEnabled="{Binding Status_RI}" ToolTip="RI status"/>
                         </StackPanel>
-                        <Border Grid.Column="2">
+                        <Border Grid.Column="2" Margin="0,0,4,0">
+                            <Button Click="Button_Detect_Click" ToolTip="Auto-detect COM port">
+                                <Path Data="M6 2L6 5M10 2L10 5M3 5L13 5L13 8L10 11L10 12L6 12L6 11L3 8ZM8 12L8 15"/>
+                            </Button>
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsOpen}" Value="True">
+                                            <Setter Property="IsEnabled" Value="False"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                        </Border>
+                        <Border Grid.Column="3">
                             <Button Click="Button_Start_Click" ToolTip="Open port">
                                 <Path Data="M1 8L4 8M4 4L4 12L8 13L8 15L12 15L12 1L8 1L8 3ZM12 4L15 4L15 12L12 12M7 5L7 11M9 5L9 11"/>
                             </Button>
@@ -108,7 +123,7 @@
                                 </Style>
                             </Border.Style>
                         </Border>
-                        <Border Grid.Column="2">
+                        <Border Grid.Column="3">
                             <Button Click="Button_Start_Click" ToolTip="Close port">
                                 <Path Data="M1 4L1 12L5 13L5 15L9 15L9 1L5 1L5 3ZM4 5L4 11M6 5L6 11M11 6L15 10M15 6L11 10"/>
                             </Button>

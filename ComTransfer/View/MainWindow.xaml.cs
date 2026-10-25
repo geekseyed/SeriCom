@@ -1,16 +1,20 @@
 ﻿using Microsoft.Win32;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.IO.Ports;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+
 
 namespace ComTransfer
 {
@@ -343,5 +347,205 @@ namespace ComTransfer
         {
             port.ForceStopReceiving();
         }
+        #region Auto-detect COM port
+        private volatile bool detecting;
+
+        /// <summary>
+        /// List the available COM port numbers
+        /// </summary>
+        private static List<int> GetComPorts()
+        {
+            List<int> ports = new List<int>();
+            try
+            {
+                foreach (string name in SerialPort.GetPortNames())
+                {
+                    string upper = name.ToUpper().Trim();
+                    int id;
+                    if (upper.StartsWith("COM") && int.TryParse(upper.Substring(3), out id) && id > 0 && !ports.Contains(id))
+                    {
+                        ports.Add(id);
+                    }
+                }
+            }
+            catch
+            {
+
+            }
+            ports.Sort();
+            return ports;
+        }
+
+        /// <summary>
+        /// Detect the serial port of the device by unplugging and replugging it
+        /// </summary>
+        private void Button_Detect_Click(object sender, RoutedEventArgs e)
+        {
+            if (port.IsOpen)
+            {
+                MessageBox.Show("Close the serial port before detecting.", "Auto-detect COM", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (detecting)
+            {
+                detecting = false;
+                port.AddSimpleLog("COM port auto-detection canceled.");
+                return;
+            }
+
+            List<int> snapshot = GetComPorts();
+
+            MessageBoxResult result = MessageBox.Show(
+                "1) Unplug the device cable (or USB adapter) now.\n2) Click OK.\n3) Plug it back in when the log asks.\n\nIf the device is not connected yet, just plug it in after clicking OK.",
+                "Auto-detect COM port",
+                MessageBoxButton.OKCancel, MessageBoxImage.Information);
+            if (result != MessageBoxResult.OK)
+            {
+                return;
+            }
+
+            detecting = true;
+            port.AddSimpleLog("COM auto-detection started, waiting for a device change...");
+
+            Task.Factory.StartNew(() => DetectComWorker(snapshot));
+        }
+
+        /// <summary>
+        /// Background worker that compares the port list before and after replug
+        /// </summary>
+        private void DetectComWorker(List<int> baseline)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+            List<int> missing = null;
+
+            while (detecting && DateTime.UtcNow < deadline)
+            {
+                List<int> now = GetComPorts();
+                if (!now.SequenceEqual(baseline))
+                {
+                    List<int> appeared = now.Except(baseline).ToList();
+                    missing = baseline.Except(now).ToList();
+                    if (appeared.Count > 0)
+                    {
+                        DetectFinished(appeared);
+                        return;
+                    }
+                    baseline = now;
+                    break;
+                }
+                Thread.Sleep(300);
+            }
+
+            if (!detecting)
+            {
+                return;
+            }
+
+            if (missing == null)
+            {
+                DetectFailed("No change was detected. Unplug the device cable after clicking OK, then try again.");
+                return;
+            }
+
+            Application.Current.Dispatcher?.Invoke((Action)(() =>
+            {
+                port.AddSimpleLog("Device unplugged: " + string.Join(", ", missing.Select(item => "COM" + item)) + ". Please plug it back in now...");
+            }));
+
+            deadline = DateTime.UtcNow.AddSeconds(45);
+            while (detecting && DateTime.UtcNow < deadline)
+            {
+                List<int> appeared = GetComPorts().Except(baseline).ToList();
+                if (appeared.Count > 0)
+                {
+                    DetectFinished(appeared);
+                    return;
+                }
+                Thread.Sleep(300);
+            }
+
+            if (detecting)
+            {
+                DetectFailed("No serial device was plugged back in. Please try again.");
+            }
+        }
+
+        /// <summary>
+        /// Apply the detected port and ask to open it
+        /// </summary>
+        private void DetectFinished(List<int> appeared)
+        {
+            Application.Current.Dispatcher?.Invoke((Action)(() =>
+            {
+                detecting = false;
+
+                if (appeared.Count != 1)
+                {
+                    string list = string.Join(", ", appeared.Select(item => "COM" + item));
+                    port.AddLog("Fault", "Cannot auto-detect the serial port, multiple candidates: " + list);
+                    MessageBox.Show("Multiple serial ports appeared: " + list + "\nConnect only the target device and try again.", "Auto-detect COM", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                int id = appeared[0];
+                SaveComPortID(id);
+
+                try
+                {
+                    port.InitialPort();
+                }
+                catch
+                {
+
+                }
+
+                port.AddLog("Operation", "Serial port auto-detected: COM" + id);
+
+                if (MessageBox.Show("Serial port detected: COM" + id + "\nSaved to configuration. Open the port now?", "Auto-detect COM", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+                {
+                    port.OpenPort();
+                }
+            }));
+        }
+
+        /// <summary>
+        /// Report a failed detection
+        /// </summary>
+        private void DetectFailed(string message)
+        {
+            Application.Current.Dispatcher?.Invoke((Action)(() =>
+            {
+                detecting = false;
+                port.AddLog("Fault", "COM port auto-detection failed: " + message);
+                MessageBox.Show(message, "Auto-detect COM", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }));
+        }
+
+        /// <summary>
+        /// Save the detected COM number into the program configuration
+        /// </summary>
+        private void SaveComPortID(int id)
+        {
+            try
+            {
+                Configuration config = ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None);
+                if (config.AppSettings.Settings["com"] == null)
+                {
+                    config.AppSettings.Settings.Add("com", id.ToString());
+                }
+                else
+                {
+                    config.AppSettings.Settings["com"].Value = id.ToString();
+                }
+                config.Save(ConfigurationSaveMode.Modified);
+                ConfigurationManager.RefreshSection("appSettings");
+            }
+            catch
+            {
+
+            }
+        }
+        #endregion
     }
 }
