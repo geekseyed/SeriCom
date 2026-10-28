@@ -248,7 +248,18 @@ namespace ComTransfer
             {
 
             }
+            if (TransferSettings.Engine == TransferEngineKind.OneWay &&
+                           (commandType == CommandType.FileTreeRequest ||
+                            commandType == CommandType.FilePullRequest ||
+                            commandType == CommandType.FilePushRequest))
+            {
+                comPort.AddLog(
+                    "Command",
+                    "Legacy pipe file requests are unavailable " +
+                    "in one-way mode. Use Send File or Schedule.");
 
+                return;
+            }
             switch (commandType)
             {
                 case CommandType.Default:

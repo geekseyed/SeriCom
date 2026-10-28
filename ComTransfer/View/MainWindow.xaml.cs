@@ -143,6 +143,10 @@ namespace ComTransfer
 
         private void Button_Pull_Click(object sender, RoutedEventArgs e)
         {
+            if (!port.CanPull)
+            {
+                return;
+            }
             if (string.IsNullOrEmpty(port.PullFilePath))
             {
                 return;
@@ -222,6 +226,10 @@ namespace ComTransfer
         }
         private void Button_SelectRemote_Click(object sender, RoutedEventArgs e)
         {
+            if (!port.CanPull)
+            {
+                return;
+            }
             FileWindow window = new FileWindow(this);
             bool? result = window.ShowDialog();
             if (result == true)

@@ -67,7 +67,11 @@
     </ApplicationDefinition>
     <Compile Include="ComPort.cs" />
     <Compile Include="LogHelper.cs" />
+    <Compile Include="OneWayFileSender.cs" />
+    <Compile Include="OneWayProtocol.cs" />
+    <Compile Include="OneWaySerialWriter.cs" />
     <Compile Include="PipelineManager.cs" />
+    <Compile Include="TransferSettings.cs" />
     <Compile Include="View\FileWindow.xaml.cs">
       <DependentUpon>FileWindow.xaml</DependentUpon>
     </Compile>

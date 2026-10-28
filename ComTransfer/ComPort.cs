@@ -13,13 +13,22 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 
+
 namespace ComTransfer
 {
     /// <summary>
     /// ViewModel that manages the serial communication process
     /// </summary>
+    /// 
+
+
     public class ComPort : CustomINotifyPropertyChanged
     {
+        private readonly object oneWaySync = new object();
+
+        private CancellationTokenSource oneWayCancellation;
+        public bool CanPull =>
+                  TransferSettings.Engine != TransferEngineKind.OneWay;
         /// <summary>
         /// Serial port parameters
         /// </summary>
@@ -32,6 +41,7 @@ namespace ComTransfer
         /// Serial port open status
         /// </summary>
         public bool Status_Open => PortStatus >= 0;
+
         /// <summary>
         /// Serial port CTS status
         /// </summary>
@@ -297,16 +307,30 @@ namespace ComTransfer
         }
         public void RestartPort(int id, int baudrate)
         {
-            Configuration configuration = ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None);
-            configuration.AppSettings.Settings["com"].Value = id.ToString();
-            configuration.AppSettings.Settings["baudrate"].Value = baudrate.ToString();
-            configuration.Save(ConfigurationSaveMode.Minimal, true);
-            ConfigurationManager.RefreshSection("appSettings");
-
             if (IsOpen)
             {
-                ClosePort();
+                if (!ClosePort())
+                {
+                    return;
+                }
             }
+
+            Configuration configuration =
+                ConfigurationManager.OpenExeConfiguration(
+                    ConfigurationUserLevel.None);
+
+            configuration.AppSettings.Settings["com"].Value =
+                id.ToString();
+
+            configuration.AppSettings.Settings["baudrate"].Value =
+                baudrate.ToString();
+
+            configuration.Save(
+                ConfigurationSaveMode.Minimal,
+                true);
+
+            ConfigurationManager.RefreshSection("appSettings");
+
             OpenPort();
         }
         /// <summary>
@@ -495,19 +519,44 @@ namespace ComTransfer
         /// <returns>Whether closing succeeded</returns>
         public bool ClosePort()
         {
-            StopTask();
-            int result;
-            if ((result = PCOMM.sio_close(PortID)) != PCOMM.SIO_OK)
+            lock (oneWaySync)
             {
-                AddLog("Fault", "Failed to close serial port: " + PCOMM.GetErrorMessage(result));
-                return false;
+                if (oneWayCancellation != null)
+                {
+                    oneWayCancellation.Cancel();
+
+                    AddLog(
+                        "Operation",
+                        "Canceling one-way output. Close the port " +
+                        "again after cancellation completes.");
+
+                    return false;
+                }
+
+                StopTask();
+
+                int result = PCOMM.sio_close(PortID);
+
+                if (result != PCOMM.SIO_OK)
+                {
+                    AddLog(
+                        "Fault",
+                        "Failed to close serial port: " +
+                        PCOMM.GetErrorMessage(result));
+
+                    return false;
+                }
+
+                AddLog(
+                    "Operation",
+                    "Serial port closed: " + PortInfo);
+
+                IsOpen = false;
+
+                Notify(new { IsOpen });
+
+                return true;
             }
-
-            AddLog("Operation", "Serial port closed: " + PortInfo);
-
-            IsOpen = false;
-            Notify(new { IsOpen });
-            return true;
         }
 
         /// <summary>
@@ -597,7 +646,9 @@ namespace ComTransfer
 
                 while (!cancellation.IsCancellationRequested)
                 {
-                    if (IsStarted && !IsSending)
+                    if (IsStarted &&
+                                  !IsSending &&
+                                  TransferSettings.Engine != TransferEngineKind.OneWay)
                     {
                         string filename = string.Empty;
                         int fno = 1;
@@ -663,8 +714,13 @@ namespace ComTransfer
                     {
                         if (ReceiveFileList.Count > 0)
                         {
-                            string filename = string.Empty;
-                            ReceiveFileList.TryDequeue(out filename);
+                            string filename;
+
+                            if (!ReceiveFileList.TryDequeue(out filename))
+                            {
+                                continue;
+                            }
+
                             string shortname = filename;
                             string targetname = filename;
 
@@ -742,8 +798,19 @@ namespace ComTransfer
                     {
                         if (SendFileList.Count > 0)
                         {
-                            string filename = string.Empty;
-                            SendFileList.TryDequeue(out filename);
+                            string filename;
+
+                            if (!SendFileList.TryDequeue(out filename))
+                            {
+                                continue;
+                            }
+
+                            if (TransferSettings.Engine == TransferEngineKind.OneWay)
+                            {
+                                SendOneWayQueuedFile(filename);
+                                continue;
+                            }
+
                             string shortname = filename;
                             string sourcename = filename;
                             string tempFolder = null;
@@ -895,6 +962,16 @@ namespace ComTransfer
         /// </summary>
         public void ForceStopSending()
         {
+            if (TransferSettings.Engine == TransferEngineKind.OneWay)
+            {
+                lock (oneWaySync)
+                {
+                    oneWayCancellation?.Cancel();
+                }
+
+                return;
+            }
+
             IsForceStopSending = true;
         }
 
@@ -1103,7 +1180,206 @@ namespace ComTransfer
             SelectedFilePath = filename;
             Notify(new { SelectedFilePath });
         }
+        private void SendOneWayQueuedFile(string filename)
+        {
+            CancellationTokenSource transferCancellation;
 
+            lock (oneWaySync)
+            {
+                if (!IsOpen || !IsStarted)
+                {
+                    return;
+                }
+
+                transferCancellation =
+                    CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellation.Token);
+
+                oneWayCancellation = transferCancellation;
+
+                IsSending = true;
+                IsForceStopSending = false;
+            }
+
+            CancellationToken token = transferCancellation.Token;
+
+            bool completed = false;
+            string shortname = Path.GetFileName(filename);
+
+            try
+            {
+                token.ThrowIfCancellationRequested();
+
+                if (IsHW || IsSW)
+                {
+                    throw new InvalidOperationException(
+                        "One-way mode requires hardware and software " +
+                        "flow control to be disabled.");
+                }
+
+                var info = new FileInfo(filename);
+
+                if (!info.Exists)
+                {
+                    throw new FileNotFoundException(
+                        "Source file was not found.",
+                        filename);
+                }
+
+                if (info.Extension.Equals(
+                    ".APPCOMMAND",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "Legacy application commands are not supported " +
+                        "by the one-way engine.");
+                }
+
+                if (info.Length >= (long)SizeLimit * 1024 * 1024)
+                {
+                    throw new IOException(
+                        "File size exceeds the configured limit.");
+                }
+
+                CurrentSendingFile = shortname;
+                SendCount = 0;
+                SendMax = info.Length;
+
+                Notify(new
+                {
+                    SendCount,
+                    SendMax,
+                    SendProgress,
+                    SendPercent,
+                    SendTimeText
+                });
+
+                AddLog(
+                    "Send",
+                    "Starting one-way output",
+                    shortname);
+
+                using (var writer = new OneWaySerialWriter(PortID))
+                {
+                    OneWayFileSender.SendFile(
+                        filename,
+
+                        frame =>
+                        {
+                            writer.WriteFrame(frame, token);
+
+                            // Keep the output queue bounded and preserve order.
+                            writer.WaitForDrain(token);
+                        },
+
+                        token,
+
+                        (processed, total) =>
+                        {
+                            SendCount = processed;
+                            SendMax = total;
+
+                            Notify(new
+                            {
+                                SendCount,
+                                SendMax,
+                                SendProgress,
+                                SendPercent,
+                                SendTimeText
+                            });
+                        });
+
+                    writer.WaitForDrain(token);
+
+                    token.ThrowIfCancellationRequested();
+                }
+
+                completed = true;
+            }
+            catch (OperationCanceledException)
+            {
+                AddLog(
+                    "Send",
+                    "One-way output canceled",
+                    shortname);
+            }
+            catch (Exception e)
+            {
+                AddLog(
+                    "Send",
+                    "One-way output failed: " + e.Message,
+                    shortname);
+            }
+            finally
+            {
+                if (!completed)
+                {
+                    try
+                    {
+                        int result = PCOMM.sio_flush(PortID, 2);
+
+                        if (result != PCOMM.SIO_OK)
+                        {
+                            AddLog(
+                                "Send",
+                                "Failed to clear serial buffers: " +
+                                PCOMM.GetErrorMessage(result),
+                                shortname);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        AddLog(
+                            "Send",
+                            "Failed to clear serial buffers: " + e.Message,
+                            shortname);
+                    }
+                }
+
+                CurrentSendingFile = null;
+
+                SendCount = 0;
+                SendMax = 0;
+
+                lock (oneWaySync)
+                {
+                    oneWayCancellation = null;
+                    IsSending = false;
+                }
+
+                transferCancellation.Dispose();
+
+                Notify(new
+                {
+                    SendCount,
+                    SendMax,
+                    SendProgress,
+                    SendPercent,
+                    SendTimeText
+                });
+            }
+
+            if (completed)
+            {
+                AddLog(
+                    "Send",
+                    "One-way output completed; receiver delivery " +
+                    "is not confirmed",
+                    shortname);
+
+                AddTransferRecord(true, filename);
+
+                PipelineManager.SendCommand(
+                    PipelineManager.CommandType.FileSended,
+                    filename);
+            }
+
+            TaskManager.Instance.FileSendedTaskHandler?.Invoke(
+                this,
+                new TaskManager.FileTaskEventArgs(
+                    filename,
+                    completed));
+        }
         /// <summary>
         /// Send File
         /// </summary>
@@ -1159,6 +1435,15 @@ namespace ComTransfer
         /// <param name="param">command parameters</param>
         public void SubmitCommand(string command, string param)
         {
+            if (TransferSettings.Engine == TransferEngineKind.OneWay)
+            {
+                AddLog(
+                    "Command",
+                    "Pull and legacy remote commands are unavailable " +
+                    "in one-way mode.");
+
+                return;
+            }
             if (command == null || command.Trim().Length == 0)
             {
                 return;
