@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:ComTransfer"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=local:ComPort}"
-        Title="Automated Serial File Transfer Tool" Width="440" Height="560" MinWidth="400" MinHeight="360" Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}" Closing="Window_Closing" KeyDown="Window_KeyDown" Icon="/app.ico">
+        Title="SeriCom | Serial File Sender " Width="440" Height="560" MinWidth="400" MinHeight="360" Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}" Closing="Window_Closing" KeyDown="Window_KeyDown" Icon="/app.ico">
     <Control>
         <Control.Resources>
             <local:IsMoreThanConverter x:Key="IsMoreThanConverter"/>
