@@ -1,4 +1,9 @@
-﻿using System;
+﻿// Receiver project only: ComTransferReceiver\ComPort.cs
+// Remove the linked ..\ComTransfer\ComPort.cs item from the receiver
+// project before adding this independent file. Do not replace the sender file.
+// Requires the previously supplied ComPort.OneWay.cs and OneWay receiver files.
+
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -18,7 +23,7 @@ namespace ComTransfer
     /// <summary>
     /// ViewModel that manages the serial communication process
     /// </summary>
-    public class ComPort : CustomINotifyPropertyChanged
+    public partial class ComPort : CustomINotifyPropertyChanged
     {
         /// <summary>
         /// Serial port parameters
@@ -165,6 +170,13 @@ namespace ComTransfer
         /// <exception cref="Exception">Serial port parameter exception</exception>
         public void SetPort()
         {
+            if (TransferSettings.Engine == TransferEngineKind.OneWay)
+            {
+                if (DataBits != 8)
+                    throw new InvalidOperationException("OneWay requires 8 data bits.");
+                if (IsHW || IsSW)
+                    throw new InvalidOperationException("Disable hardware and software flow control before using OneWay.");
+            }
             int result;
             int baudRate, dataBits, stopBits, parity;
             bool customBaudRate = false;
@@ -256,6 +268,13 @@ namespace ComTransfer
                 }
             }
 
+            if (TransferSettings.Engine == TransferEngineKind.OneWay)
+            {
+                result = PCOMM.sio_SetReadTimeouts(port, -1, 0);
+                if (result != PCOMM.SIO_OK)
+                    throw new IOException("Cannot enable non-blocking serial input: " + PCOMM.GetErrorMessage(result));
+            }
+
             //PCOMM.sio_SetReadTimeouts(port, 60000, 1000);
             //PCOMM.sio_SetWriteTimeouts(port, 60000);
 
@@ -297,16 +316,13 @@ namespace ComTransfer
         }
         public void RestartPort(int id, int baudrate)
         {
+            if (IsOpen && !ClosePort()) return;
+
             Configuration configuration = ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None);
             configuration.AppSettings.Settings["com"].Value = id.ToString();
             configuration.AppSettings.Settings["baudrate"].Value = baudrate.ToString();
             configuration.Save(ConfigurationSaveMode.Minimal, true);
             ConfigurationManager.RefreshSection("appSettings");
-
-            if (IsOpen)
-            {
-                ClosePort();
-            }
             OpenPort();
         }
         /// <summary>
@@ -445,10 +461,9 @@ namespace ComTransfer
         /// <returns>Whether opening succeeded</returns>
         public bool OpenPort()
         {
-            if (IsOpening)
-            {
+            if (IsOpening || IsOpen || cancellation.IsCancellationRequested)
                 return false;
-            }
+
             IsOpening = true;
             try
             {
@@ -458,32 +473,45 @@ namespace ComTransfer
             {
                 AddLog("Fault", "Failed to read configuration: " + e.Message);
                 IsOpening = false;
+                Notify(new { IsOpening });
                 return false;
             }
 
+            bool nativePortOpened = false;
             try
             {
-                int result;
-                if ((result = PCOMM.sio_open(PortID)) != PCOMM.SIO_OK)
+                int result = PCOMM.sio_open(PortID);
+                if (result != PCOMM.SIO_OK)
                 {
                     AddLog("Fault", "Failed to open serial port: " + PCOMM.GetErrorMessage(result));
                     IsOpening = false;
+                    Notify(new { IsOpening });
                     return false;
                 }
 
+                nativePortOpened = true;
                 SetPort();
             }
             catch (Exception e)
             {
+                if (nativePortOpened)
+                {
+                    lock (oneWayPortSync)
+                    {
+                        PCOMM.sio_close(PortID);
+                    }
+                }
+
                 AddLog("Fault", "Failed to open serial port: " + e.Message);
+                IsOpen = false;
                 IsOpening = false;
+                Notify(new { IsOpen, IsOpening });
                 return false;
             }
 
-            AddLog("Operation", "Serial port opened: " + PortInfo);
-
             IsOpen = true;
             IsOpening = false;
+            AddLog("Operation", "Serial port opened: " + PortInfo);
             Notify(new { IsOpen, IsOpening });
             StartTask();
             return true;
@@ -495,17 +523,22 @@ namespace ComTransfer
         /// <returns>Whether closing succeeded</returns>
         public bool ClosePort()
         {
-            StopTask();
             int result;
-            if ((result = PCOMM.sio_close(PortID)) != PCOMM.SIO_OK)
+            lock (oneWayPortSync)
+            {
+                StopTask();
+                if (!IsOpen) return true;
+                result = PCOMM.sio_close(PortID);
+                if (result == PCOMM.SIO_OK) IsOpen = false;
+            }
+
+            if (result != PCOMM.SIO_OK)
             {
                 AddLog("Fault", "Failed to close serial port: " + PCOMM.GetErrorMessage(result));
                 return false;
             }
 
             AddLog("Operation", "Serial port closed: " + PortInfo);
-
-            IsOpen = false;
             Notify(new { IsOpen });
             return true;
         }
@@ -587,6 +620,12 @@ namespace ComTransfer
             cancellation = new CancellationTokenSource();
             receiveTask = new Task(() =>
             {
+                if (TransferSettings.Engine == TransferEngineKind.OneWay)
+                {
+                    RunOneWayReceiver();
+                    return;
+                }
+
                 byte[] buffer = new byte[260];
                 GCHandle gc_fn = GCHandle.Alloc(buffer, GCHandleType.Pinned);
                 IntPtr fnp = gc_fn.AddrOfPinnedObject();
@@ -767,7 +806,7 @@ namespace ComTransfer
                                     SendErrorReport(string.Format("File size exceeds limit: {0}", shortname), filename);
                                     filename = null;
                                 }
-                                else if(fileInfo.Extension.ToUpper() != ".APPCOMMAND")
+                                else if (fileInfo.Extension.ToUpper() != ".APPCOMMAND")
                                 {
                                     AddLog("Send", "Compressing file", shortname);
                                     tempFolder = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
@@ -903,6 +942,18 @@ namespace ComTransfer
         /// </summary>
         public void ForceStopReceiving()
         {
+            if (TransferSettings.Engine == TransferEngineKind.OneWay)
+            {
+                lock (oneWayPortSync)
+                {
+                    Interlocked.Increment(ref oneWayResetVersion);
+                    if (IsOpen) PCOMM.sio_flush(PortID, 0);
+                }
+
+                AddLog("Receive", "Receive cancellation requested. Resend the whole file to restart.");
+                return;
+            }
+
             IsForceStopReceiving = true;
         }
 
@@ -1031,31 +1082,25 @@ namespace ComTransfer
         /// </summary>
         private void StartTask()
         {
+            Interlocked.Increment(ref oneWayResetVersion);
             IsStarted = true;
 
-            TaskManager.Instance.FileTaskHandler += FileTaskHandler;
+            // Receiver deployment: never subscribe to scheduled sends.
+            TaskManager.Instance.FileTaskHandler -= FileTaskHandler;
 
             try
             {
-                if (receiveTask.Status != TaskStatus.Running)
-                {
+                if (receiveTask.Status == TaskStatus.Created)
                     receiveTask.Start();
-                }
 
-                if (sendTask.Status != TaskStatus.Running)
-                {
-                    sendTask.Start();
-                }
-
-                if (fileTask.Status != TaskStatus.Running)
-                {
+                // OneWay validates and saves files directly.
+                if (TransferSettings.Engine == TransferEngineKind.Zmodem &&
+                    fileTask.Status == TaskStatus.Created)
                     fileTask.Start();
-                }
 
-                if (statusTask.Status != TaskStatus.Running)
-                {
+                // Receiver deployment: sendTask is intentionally never started.
+                if (statusTask.Status == TaskStatus.Created)
                     statusTask.Start();
-                }
             }
             catch (Exception e)
             {
@@ -1068,8 +1113,8 @@ namespace ComTransfer
         /// </summary>
         private void StopTask()
         {
+            Interlocked.Increment(ref oneWayResetVersion);
             TaskManager.Instance.FileTaskHandler -= FileTaskHandler;
-
             IsStarted = false;
             IsSending = false;
             IsReceiveWaiting = false;
@@ -1082,6 +1127,8 @@ namespace ComTransfer
         public void Dispose()
         {
             cancellation.Cancel();
+            if (IsOpen) ClosePort();
+            else StopTask();
         }
 
         /// <summary>
@@ -1090,6 +1137,12 @@ namespace ComTransfer
         /// <param name="filename">file path</param>
         public void SelectRemotePath(string filename)
         {
+            if (IsReceiverOnly)
+            {
+                AddLog("Receiver", "Remote file selection is disabled in the receiver application.");
+                return;
+            }
+
             PullFilePath = filename;
             Notify(new { PullFilePath });
         }
@@ -1110,6 +1163,12 @@ namespace ComTransfer
         /// <param name="filename">file path</param>
         public void SendFile(string filename)
         {
+            if (IsReceiverOnly)
+            {
+                AddLog("Receiver", "Sending is disabled in the receiver application.");
+                return;
+            }
+
             SendFileList.Enqueue(filename);
 
             AddLog("Send", "File send task added", filename);
@@ -1141,7 +1200,7 @@ namespace ComTransfer
         /// <param name="filename">file name</param>
         public void SendErrorReport(string message, string filename = null)
         {
-            if (message==null || message.ToUpper().EndsWith(".APPCOMMAND"))
+            if (message == null || message.ToUpper().EndsWith(".APPCOMMAND"))
             {
                 return;
             }
@@ -1159,6 +1218,12 @@ namespace ComTransfer
         /// <param name="param">command parameters</param>
         public void SubmitCommand(string command, string param)
         {
+            if (IsReceiverOnly)
+            {
+                AddLog("Receiver", "Outgoing serial commands are disabled in the receiver application.");
+                return;
+            }
+
             if (command == null || command.Trim().Length == 0)
             {
                 return;
@@ -1199,7 +1264,7 @@ namespace ComTransfer
                     break;
             }
 
-            AddLog("Command", string.Format("Send {0} command to remote", commandType) );
+            AddLog("Command", string.Format("Send {0} command to remote", commandType));
 
             try
             {
@@ -1451,7 +1516,7 @@ namespace ComTransfer
         /// Transfer record list
         /// </summary>
         public ObservableCollection<string> RecordList { get; set; } = new ObservableCollection<string>();
-        
+
         /// <summary>
         /// Add a simple log entry
         /// </summary>
@@ -1484,11 +1549,11 @@ namespace ComTransfer
         /// <param name="filename">file name</param>
         public void AddLog(string brief, string message, string filename = null)
         {
-            if (filename != null && filename.ToUpper().EndsWith(".GZ"))
+            if (TransferSettings.Engine == TransferEngineKind.Zmodem && filename != null && filename.ToUpper().EndsWith(".GZ"))
             {
                 filename = filename.Remove(filename.Length - 3);
             }
-            if (filename != null && filename.ToUpper().EndsWith(".APPCOMMAND"))
+            if (TransferSettings.Engine == TransferEngineKind.Zmodem && filename != null && filename.ToUpper().EndsWith(".APPCOMMAND"))
             {
                 return;
             }
@@ -1523,7 +1588,7 @@ namespace ComTransfer
         /// <param name="filename">file name</param>
         public void AddTransferRecord(bool isSend, string filename)
         {
-            if (filename != null && filename.ToUpper().EndsWith(".APPCOMMAND"))
+            if (TransferSettings.Engine == TransferEngineKind.Zmodem && filename != null && filename.ToUpper().EndsWith(".APPCOMMAND"))
             {
                 return;
             }

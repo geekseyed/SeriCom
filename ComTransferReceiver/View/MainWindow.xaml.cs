@@ -34,6 +34,13 @@ namespace ComTransfer
 
             InitializeComponent();
 
+            Title = "SeriCom - Receiver Only - " + TransferSettings.Engine;
+            port.AddLog("Startup", "Role: Receiver; Engine: " + TransferSettings.Engine);
+            if (TransferSettings.Engine == TransferEngineKind.OneWay)
+            {
+                port.AddLog("Startup", "Open the receiver COM port before sending. Files are saved only after complete validation.");
+            }
+
             CheckPipeline();
 
             CheckAutoRun();
